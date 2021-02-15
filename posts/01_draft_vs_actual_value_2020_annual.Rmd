@@ -1,0 +1,393 @@
+---
+title: "Hindsight 2020  - Examination of the Draft vs Actual Value in Fantasy Football"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+```{r libsetup, include=FALSE}
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(plotly)
+library(crosstalk)
+
+options(dplyr.summarise.inform=F)
+```
+ 
+```{r datasetup, include=FALSE}
+base_dir <- '..//data//'
+
+df_stats <- fread(paste0(c(base_dir,'stats_df.csv'), collapse='')) %>%
+  filter(!is.na(player_id)) %>%
+  filter(year >= 2012) %>%
+  filter(page_type != 'half-ppr')
+
+df_adp <- fread(paste0(c(base_dir,'adp_df.csv'), collapse='')) %>%
+  select(-one_of('player_url', 'url', 'datetime_scraped', 'page_type')) %>%
+  mutate(draft_round = ceiling(ADP / 12)) %>%
+  mutate(draft_round = ifelse(draft_round > 16, 17, draft_round))
+ 
+```
+
+
+## Introduction
+
+In the wrap of the 2020 NFL season, I was thinking back to the day in August when I drafted my teams. I wanted to get an idea of both the quantiative impact of value vs ADP, as well as what the associated error is with respect to player performance, and how that data reflected in the shakeout of the 2020 season. 
+
+It had also been a hot minute since I did any analysis in R wanted to play around with the R plotly library to test out it's live non-shiny capabilities.  Added some extra controls to allow uers to dig a bit deeper in to visuals.
+
+Data used was scraped from FantasyPros and is all reflective of **HALF-PPR** values assuming a **12 Person League**.  Not all datasets used had historical accuracy for prior years, so some years may be omitted from certain visualizations.
+
+
+## Draft vs Actual Value
+
+In fantasy football, as you draft players there is the expectation that they will perform to level that is expected to justify their draft order.  Due to the unpredictability of the sport - there are players that exceed expectations and players that fail to meet the expectations set by their draft rankings. 
+
+So who are the winners and losers from this fold, and is there any consistency to how a player performs year to year? We've all been by wasting a draft pick on where we don't get the expected value.  Looking at this data graphically to explore it can help inform us of the season that we just experienced, and can help discern who the winners and losers were in relation to the draft ranking, think of new questions to ask the data, and help strategize for next year's draft. 
+
+
+## Point Distribution by Players
+
+Although point distributions are important - we want to compare players to the Value over Replacement (VORP) metric. The VORP metric compares relative value of a specific player across positions comparing the projected performance of the specific player against the projected performance of an average/replacement player - or in this case, the estimated value of a player at the top of the waiver wire.
+
+This requires establishing a threshold of what the value of the replacement would be as a player you could likely pick up on waivers.  The method used for this analysis was to show players above a rank of 48 for WR and RB positions and 24 for all other positions.
+
+Looking at simple point distributions - you can see the seasonal points by position, indicating that the value by position can vary a bit year over year, and you can appreciate the seasons that the impact of our outliers (2019 CMC or 2020 Travis Kelce) had on the position.  
+
+
+```{r points_by_yearposition, echo=FALSE, warning=FALSE}
+annual_points <- df_stats %>%
+  group_by(Position, year, `Player Name`, player_id) %>%
+  summarise(`Total Points` = sum(Points)) %>%
+  group_by(Position, year) %>%
+  mutate(`Position Rank` = dense_rank(desc(`Total Points`))) %>%
+  ungroup()
+
+annual_points_shared <- annual_points %>%
+  mutate(threshold = ifelse(`Position` %in% c('RB','WR'), 48, 24)) %>%
+  filter(`Position Rank` <= threshold) %>%
+  filter(year >= 2015) %>%
+  filter(`Position Rank` <= threshold) %>%
+  select(-threshold) %>%
+  SharedData$new()
+
+annual_points_box <- annual_points_shared %>%
+  plot_ly(x=~year, y=~`Total Points`, color=~Position, 
+          type='box', 
+          text=~paste(
+            'Name:', `Player Name`,
+            '<br> Total Points:',`Total Points`,
+            '<br> Position Rank', `Position Rank`
+          ),
+          hoverinfo='text') %>%
+
+  layout(
+    title = 'Points Distribution By Year and Position',
+    boxmode = "group"
+    )
+
+bscols(
+  widths=c(2,NA),
+  list(
+      filter_select(
+        id = 'Position Selctor',
+        label = 'Position',
+        sharedData = annual_points_shared,
+        group = ~Position
+        ),
+      filter_checkbox(
+        id = 'Year Selctor',
+        label = 'Year',
+        sharedData = annual_points_shared,
+        group = ~year
+      )
+    ),
+    annual_points_box
+)
+```
+
+## Expected VORP
+If we want to get an idea of positional VORP - we can get the benefit of understanding our comparison variable (the 48th ranked WR/RB, 24th other) as well as the distribution of points of the top players.
+
+This overall was calculated by calculating mean points by ranked position (mean of top 1, of top 2, etc) by final ranking based on season points since 2015
+
+```{r mean_vorp_positional, echo=FALSE, warning=FALSE}
+ranking_mean_points <- annual_points %>%
+  #split and accumulate by year (expanding window)
+  split(.$year) %>%
+  accumulate(~bind_rows(.x,.y)) %>%
+  bind_rows(.id='acc_year') %>% 
+  # calc mean
+  group_by(acc_year, `Position`, `Position Rank`) %>%
+  summarise(`Mean Points` = mean(`Total Points`)) %>%
+  ungroup() %>%
+  rename(year=acc_year) %>%
+  mutate(year=as.integer(year)) %>%
+  filter(year >= 2015)
+  
+# Calculate replacement player value
+replacement_points <- ranking_mean_points %>%
+  mutate(threshold = ifelse(`Position` %in% c('RB','WR'), 48, 24)) %>%
+  filter(`Position Rank` == threshold) %>%
+  select(-one_of('Position Rank', 'threshold')) %>%
+  rename(`replacement_points` = `Mean Points`)
+
+positional_vorp_points  <- ranking_mean_points %>%
+  inner_join(replacement_points, by=c('year', 'Position')) %>%
+  #calc vorp points
+  mutate(`VORP Points` = `Mean Points` - `replacement_points`) %>%
+  select(-`replacement_points`) %>%
+  # calculate VORP rankings
+  group_by(year) %>%
+  mutate(`VORP Rank` = dense_rank(desc(`VORP Points`))) %>%
+  ungroup()
+  
+
+positional_vorp_points %>%
+  filter(year == 2020) %>%
+  # group_by(Position, `Position Rank`) %>%
+  # summarise(`VORP Points` = mean(`VORP Points`)) %>%
+  filter(`VORP Points` >= 0) %>%
+  plot_ly(x=~Position, y=~`VORP Points`, color=~Position, 
+          type='box') %>%
+  layout(
+    title = 'Average VORP Distrbution by Position'
+  )
+
+```
+
+This shows why we generally draft RB's first  as they score higher - the glaring omission of this is how predictive the top ranked players at beginning of the season are at the end of the season, but can give us an idea of expectations when it comes to player selection.
+
+## ADP vs Expected Values
+
+I wanted to build a visual where you could do a little bit extra exploration.  Here we plot the expected VORP by ADP ranking, and compare it to their actual VORP based on their draft ranking, assuming that they finish at the position they start (justifying their ranking), where I could explore the data on a YoY, Positional, Draft Round, and Player-Wise Basis.
+
+Draft rounds are based on a 12 - person league
+
+**Note: Draft Rounds beyond 16 are just assigned the value 17 to be included in the visual**
+
+```{r adp_vs_expected, echo=FALSE, warning=FALSE}
+actual_vs_draft <- annual_points %>%
+  filter(year > 2018) %>%
+  inner_join(replacement_points, by=c('year', 'Position')) %>%
+  mutate(`Actual VORP` = `Total Points` - replacement_points) %>%
+  # select(-replacement_points) %>%
+  # join adp
+  inner_join(select(df_adp, -`Player Name`), by=c('Position', 'year', 'player_id')) %>%
+  # join vorp for projected points
+  inner_join(select(positional_vorp_points, -`Position Rank`, -Position),
+             by=c('year', 'ADP'='VORP Rank')
+  ) %>%
+  rename(`Projected Points` = `Mean Points`, 
+         `Projected VORP` = `VORP Points`) %>%
+  mutate(`VORP Variance` = `Actual VORP`-`Projected VORP`)
+
+actual_vs_draft_shared <- actual_vs_draft %>%
+  mutate(year = as.factor(year)) %>%
+  SharedData$new()
+
+a_v_d_scatter <- actual_vs_draft_shared %>%
+  plot_ly(x=~`Projected VORP`, y=~`Actual VORP`, 
+          color=~Position,
+          hoverinfo='text',
+          text=~paste('Player:', `Player Name`,
+                      '<br> Year: ', year,
+                      '<br> Actual VORP: ', round(`Actual VORP`,2),
+                      '<br> Projected VORP: ', round(`Projected VORP`,2),
+                      '<br> ADP:', ADP,
+                      '<br> Draft Round: ', draft_round
+                      )
+          ) %>%
+  add_markers() %>%
+  layout(shapes=list(type='line', x0=-100, x1= 200, y0=-100, y1=200, line=list(dash='dot', width=3)))
+
+      
+bscols(
+  widths=c(3,NA),
+  list(
+    filter_select(
+      id = 'Position Selctor',
+      label = 'Position',
+      sharedData = actual_vs_draft_shared,
+      group = ~Position
+    ),
+    filter_checkbox(
+      id = 'Year Selctor',
+      label = 'Year',
+      sharedData = actual_vs_draft_shared,
+      group = ~year
+    ),
+    filter_slider(
+      id = 'Round Selector',
+      label = 'Draft Round',
+      sharedData = actual_vs_draft_shared,
+      column = ~draft_round
+    ),
+    filter_select(
+      id = 'Player Selector',
+      label = 'Player',
+      sharedData = actual_vs_draft_shared,
+      group = ~`Player Name`
+    )
+  ),
+  list(
+    a_v_d_scatter
+  )
+)
+
+```
+
+Looking the round 1 draft class of 2020 - gives you the appreciation of the season Henry, Cook, and Kamara had - but also the effect of injuries (CMC & Barkley).  Also it is worth noting this just looks at season totals vs average per game played, which makes Chubb's total impressive in terms of how many games he missed in terms of proximity to projected. 
+
+## Round Wise Rankings
+
+Further depth of exploration into round-wise rankings gives a breakdown of performance vs round.  It's worth noticing not only the value provided by the top picks, but also the sleeper performances by players in deeper rounds such as Tannehill and Nyheim Hines.  This exploration only looked at ADP <= 192 (12 players * 16 rounds), but in larger leagues, Herbert and James Robinson would have been deep outliers as well.
+
+
+```{r VORP_by_round, echo=FALSE, warning=FALSE, fig.width=14, fig.height=12}
+
+
+actual_vs_draft_sub <- actual_vs_draft %>%
+  filter(year==2020) %>%
+  filter(draft_round != 17) %>%
+  SharedData$new()
+
+actual_vs_draft_sub %>%
+  ggplot(aes(x=reorder(`Player Name`, ADP), y=`Actual VORP`, fill=`Position`)) +
+  geom_bar(stat='identity') +
+  geom_line(data=actual_vs_draft_sub, aes(x=`Player Name`, y=`Projected VORP`, group=1), color='red') +
+  facet_wrap(~ draft_round, scales='free_x') +
+  theme(axis.text.x = element_text(face = "bold", hjust = 1, 
+                                   size = 9, angle = 65),
+        plot.title = element_text(hjust = 0.5)
+  ) +
+  xlab('Player Name') +
+  ylab('Actual vs Projected VORP') +
+  ggtitle('Actual vs Projected VORP by Draft Round/ADP')
+
+```
+
+## Variance Actual Vs Projected
+
+So we get it - some players do better than expected, some don't. Can we get any measure of consistency in order to get some metric to help guide draft strategy for future seasons.
+
+Examining variance distributions by position can help give a better idea of the distribution of variance by position.  We can also calculate the correlation coefficient (r) between variance and actual in order to quantify predictability between position and variance.
+
+```{r VORP_variance_by_position, echo=FALSE, warning=FALSE, fig.width=14}
+
+actual_vs_draft_var_pos <- actual_vs_draft %>%
+  filter(draft_round != 17) %>%
+  group_by(Position, year) %>%
+  mutate(`Variance Corr` = cor(`Actual VORP`, `Projected VORP`)) %>%
+  ungroup()
+
+actual_vs_draft_var_pos %>%
+  ggplot(aes(x=`VORP Variance`, fill=Position)) +
+  geom_density(alpha=0.2, position = "stack") +
+  geom_vline(xintercept = 0) +
+  facet_grid(year ~ Position) +
+  ggtitle('Variance of Actual vs Expected VORP by Position') +
+  geom_text(
+    size    = 5,
+    data    = actual_vs_draft_var_pos,
+    mapping = aes(x = Inf, y = Inf, label = paste(
+                                              'r =', 
+                                              round(`Variance Corr`,2)
+                                              )
+                  ),
+    hjust   = 1.05,
+    vjust   = 1.5
+  )
+```
+
+In a perfect word - we'd want the variance to be centered on 0, meaning that we get the performance out of a player that we paid for.  Instead - some players do better, and some players do worse. 
+
+Looking at DST and K distributions - looks like distribution skews higher than zero, representing the common logic of DST/K positions are hard to predict who is going to be good in a given year, but if these were easier to predict, they're undervalued in ADP.  2020 had an interesting spike in kickers that performed slightly better than ADP, but correlation between actual and predicted VORP score remains the same. 
+
+
+Positions on a YoY basis is also an interesting look, RB consistency of 2019 vs 2020 is a completely different ballgame, where we got a correlation of 0.83 vs 0.53 between 2020 and 2019.  It is interesting with the omission of RB's that correlations are relatively the same between years.  It would be interesting to see how these distributions are different in relation to prior year performances.
+
+
+## Correlation by Draft Round
+
+Looking at the relationship of Actual VORP to draft round would be an interesting look as well.  What is the estimated impact of each sequential draft round with respect to performance, and how correlated is that relationship?
+
+
+```{r VORP_variance_by_draftround, echo=FALSE, warning=FALSE, fig.width=14}
+
+get_formula <- function(model) {
+  # Helper function for formula extraction
+  broom::tidy(model)[, 1:2] %>%
+    mutate(sign = ifelse(sign(estimate) == 1, ' + ', ' - ')) %>% #coeff signs
+    mutate_if(is.numeric, ~ abs(round(., 2))) %>% #for improving formatting
+    mutate(a = ifelse(term == '(Intercept)', paste0('y ~ ', estimate), paste0(sign, estimate, ' * ', term))) %>%
+    summarise(formula = paste(a, collapse = '')) %>%
+    as.character()
+    }
+
+actual_vs_draft_var_rd <- actual_vs_draft %>%
+  filter(draft_round != 17) %>%
+  mutate(year = as.character(year))
+
+actual_vs_draft_var_rd_shared <- actual_vs_draft_var_rd %>%
+  SharedData$new()
+
+fit <- lm(`Actual VORP` ~ draft_round, data = actual_vs_draft_var_rd)
+r2 <- round(summary(fit)$r.squared,2)
+
+actual_vs_draft_draftrnd_scatter <- actual_vs_draft_var_rd_shared %>%
+  plot_ly(x=~draft_round, y=~`Actual VORP`,
+          color=~year,
+          hoverinfo='text',
+          text=~paste('Year: ', year,
+                      '<br> Round:', draft_round,
+                      '<br> ADP', ADP,
+                      '<br> Player Name', `Player Name`,
+                      '<br> Avg VORP:', round(`Actual VORP`,2)
+                      )
+          ) %>%
+  add_markers(alpha=0.7) %>%
+  # layout(xaxis = list(autorange = "reversed")) %>%
+  add_lines(x = ~draft_round, y = fitted(fit), line = list(color = 'orange')) %>%
+  layout(
+    title='Draft Round vs Actual VORP by Year',
+    xaxis=list(title='Draft Round'),
+    yaxis=list(title='VORP by Player'),
+    showlegend = F,
+    annotations = list(x=~mean(draft_round) +1, y=~mean(`Actual VORP`), 
+                       text = paste(
+                                get_formula(fit),
+                                '<br> R2=', r2
+                              ), 
+                        showarrow = T)
+  )
+
+bscols(
+  widths=c(2,NA),
+  filter_checkbox(
+    id='draftrnd_yr',
+    label='Year',
+    actual_vs_draft_var_rd_shared,
+    group=~year
+  ),
+  actual_vs_draft_draftrnd_scatter
+)
+```
+
+There is a slope of `r round(broom::tidy(fit)[2,2],2)` when comparing actual VORP from 2019 and 2020 to draft round, meaning for each round increase, the expected actual VORP of a player would decrease by 7.04 points.  This however has a weak relationship of R2 == `r r2`, meaning that ADP of the draft round only explains `r r2 * 100` percent of the variance on a player-wise basis.  
+
+
+## Wrap Up
+The key to understanding any set of data is viewing it graphically, trying to pick it a part and see if you can understand it.  In this analysis I was looking to understand some of the assumptions that go into draft strategies and how that shakes out into real-world performance.
+
+A major assumption of this analysis is that you can measure overall player value by the sum of total points that they earned this year - it would be interesting include some measure of WoW consistency by player. 
+
+Thanks for reading - and remember, if you're doing well at Fantasy Football, you're doing well at LIFE!
+
+This article was produced in RMarkdown with plots in ggplot2 and plotly - source code is here [github link]()

@@ -1,4 +1,4 @@
-*
+*.*
 !.gitignore
 !posts/*.Rmd
 !data/stats_df.csv
