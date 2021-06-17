@@ -1,5 +1,1 @@
-*.*
-!.gitignore
-!posts/*.Rmd
-!data/stats_df.csv
-!data/draft_df.csv
+

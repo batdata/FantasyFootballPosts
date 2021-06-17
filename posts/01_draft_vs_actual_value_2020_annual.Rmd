@@ -1,6 +1,7 @@
 ---
 title: "Hindsight 2020  - Examination of the Draft vs Actual Value in Fantasy Football"
 output: html_document
+always_allow_html: true
 ---
 
 ```{r setup, include=FALSE}
@@ -16,6 +17,7 @@ library(tidyr)
 library(purrr)
 library(plotly)
 library(crosstalk)
+library(knitr)
 
 options(dplyr.summarise.inform=F)
 ```
@@ -40,7 +42,7 @@ df_adp <- fread(paste0(c(base_dir,'adp_df.csv'), collapse='')) %>%
 
 In the wrap of the 2020 NFL season, I was thinking back to the day in August when I drafted my teams. I wanted to get an idea of both the quantiative impact of value vs ADP, as well as what the associated error is with respect to player performance, and how that data reflected in the shakeout of the 2020 season. 
 
-It had also been a hot minute since I did any analysis in R wanted to play around with the R plotly library to test out it's live non-shiny capabilities.  Added some extra controls to allow uers to dig a bit deeper in to visuals.
+It had also been a hot minute since I did any analysis in R wanted to play around with the R plotly library to test out it's live non-shiny capabilities.  Added some extra controls to allow users to dig a bit deeper in to visuals.
 
 Data used was scraped from FantasyPros and is all reflective of **HALF-PPR** values assuming a **12 Person League**.  Not all datasets used had historical accuracy for prior years, so some years may be omitted from certain visualizations.
 
@@ -92,6 +94,7 @@ annual_points_box <- annual_points_shared %>%
     boxmode = "group"
     )
 
+
 bscols(
   widths=c(2,NA),
   list(
@@ -109,7 +112,7 @@ bscols(
       )
     ),
     annual_points_box
-)
+) 
 ```
 
 ## Expected VORP
@@ -382,6 +385,35 @@ bscols(
 
 There is a slope of `r round(broom::tidy(fit)[2,2],2)` when comparing actual VORP from 2019 and 2020 to draft round, meaning for each round increase, the expected actual VORP of a player would decrease by 7.04 points.  This however has a weak relationship of R2 == `r r2`, meaning that ADP of the draft round only explains `r r2 * 100` percent of the variance on a player-wise basis.  
 
+## Best and Worst Value Players of 2020
+```{r best_and_worst, echo=FALSE, warning=FALSE}
+
+player_values_df <- actual_vs_draft %>%
+  filter(year == 2020) %>%
+  select(Position, `Player Name`, `Total Points`,`Projected Points`, `Actual VORP`, `Projected VORP` , `VORP Variance`) %>%
+  mutate(across(where(is.numeric), round, 2))
+
+best_value_players <- player_values_df %>%
+  arrange(desc(`VORP Variance`)) %>%
+  head(20) 
+
+best_value_players %>%
+  kable(caption='Top 20 Best Values Players of 2020', "pipe")
+
+worst_value_players <- player_values_df %>%
+  arrange(`VORP Variance`) %>%
+  head(20)
+
+worst_vale_players <- worst_value_players %>%
+  kable(caption='Top 20 Worst Values Players of 2020', 'pipe')
+
+```
+
+## Conclusion
+
+VORP is a good method to get a good idea of overall value.  Through VORP calculations can get an idea of what player value should have been and how that compares with actual fantasy points scored.
+
+Traditional understanding of player performance dictates that players with a higher ADP **tend** to score higher than players with lower ADP, but due to prevalence of sleepers, breakouts, and duds - this is not always the case.  We can see by running a regression on the expectation that this is true - but it is only mildly correlated with it explaining 20% of the overall variance of actual vs prediction.
 
 ## Wrap Up
 The key to understanding any set of data is viewing it graphically, trying to pick it a part and see if you can understand it.  In this analysis I was looking to understand some of the assumptions that go into draft strategies and how that shakes out into real-world performance.
@@ -390,4 +422,7 @@ A major assumption of this analysis is that you can measure overall player value
 
 Thanks for reading - and remember, if you're doing well at Fantasy Football, you're doing well at LIFE!
 
-This article was produced in RMarkdown with plots in ggplot2 and plotly - source code is here [github link]()
+This article was produced in RMarkdown with plots in ggplot2 and plotly - source code is here [github link](https://github.com/batdata/FantasyFootballPosts/blob/main/posts/01_draft_vs_actual_value_2020_annual.Rmd)
+
+
+        
